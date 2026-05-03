@@ -387,6 +387,25 @@ export const modelArchs: ModelArch[] = [
     },
   },
   {
+    name: 'anima',
+    label: 'Anima',
+    group: 'image',
+    defaults: {
+      // default updates when [selected, unselected] in the UI
+      'config.process[0].model.name_or_path': ['circlestone-labs/Anima', defaultNameOrPath],
+      'config.process[0].model.extras_name_or_path': ['Qwen/Qwen3-0.6B', undefined],
+      'config.process[0].model.quantize': [true, false],
+      'config.process[0].model.quantize_te': [true, false],
+      'config.process[0].model.low_vram': [true, false],
+      'config.process[0].sample.sampler': ['flowmatch', 'flowmatch'],
+      'config.process[0].train.noise_scheduler': ['flowmatch', 'flowmatch'],
+      'config.process[0].train.timestep_type': ['weighted', 'sigmoid'],
+      'config.process[0].model.qtype': ['qfloat8', 'qfloat8'],
+    },
+    disableSections: ['network.conv'],
+    additionalSections: ['model.low_vram', 'model.layer_offloading'],
+  },
+  {
     name: 'qwen_image_edit',
     label: 'Qwen-Image-Edit',
     group: 'instruction',

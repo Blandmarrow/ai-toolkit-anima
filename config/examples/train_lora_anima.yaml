@@ -1,0 +1,66 @@
+---
+job: extension
+config:
+  name: "my_anima_lora_[name]"
+  process:
+    - type: 'sd_trainer'
+      training_folder: "output"
+      device: cuda:0
+      network:
+        type: "lora"
+        linear: 16
+        linear_alpha: 16
+      save:
+        dtype: float16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      datasets:
+        - folder_path: "/path/to/images"
+          caption_ext: "txt"
+          caption_dropout_rate: 0.05
+          cache_latents_to_disk: true
+          resolution: [ 512, 768, 1024 ]
+      train:
+        batch_size: 1
+        steps: 2000
+        gradient_accumulation: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+        optimizer: "adamw8bit"
+        lr: 1e-4
+        dtype: bf16
+        cache_text_embeddings: true
+      model:
+        arch: "anima"
+        # Transformer: path to anima-preview3-base.safetensors, or HF repo ID
+        name_or_path: "/path/to/split_files/diffusion_models/anima-preview3-base.safetensors"
+        # Text encoder: "Qwen/Qwen3-0.6B" (HF hub) or path to qwen_3_06b_base.safetensors
+        # Using the HF repo ID is recommended — avoids needing a local copy.
+        extras_name_or_path: "Qwen/Qwen3-0.6B"
+        # VAE: path to qwen_image_vae.safetensors, or omit to auto-download from HF
+        # vae_path: "/path/to/split_files/vae/qwen_image_vae.safetensors"
+        quantize: true
+        quantize_te: true
+        qtype: "qfloat8"
+        qtype_te: "qfloat8"
+        low_vram: true
+      sample:
+        sampler: "flowmatch"
+        sample_every: 250
+        width: 1024
+        height: 1024
+        prompts:
+          - "masterpiece, best quality, score_7, 1girl, silver hair, fantasy armor, epic pose"
+          - "masterpiece, best quality, score_7, a samurai in a misty forest, dramatic lighting"
+          - "masterpiece, best quality, score_7, cat girl in a cozy cafe, soft pastel lighting"
+          - "masterpiece, best quality, score_7, dragon soaring above ancient ruins, vibrant colors"
+        neg: ""
+        seed: 42
+        walk_seed: true
+        guidance_scale: 4
+        sample_steps: 30
+meta:
+  name: "[name]"
+  version: '1.0'
