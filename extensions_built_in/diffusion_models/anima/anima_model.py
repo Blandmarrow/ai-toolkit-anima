@@ -8,8 +8,6 @@ from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, Qwen2Tokenizer, T5TokenizerFast
 import huggingface_hub
 
-from toolkit.samplers.custom_flowmatch_sampler import calculate_shift
-
 from toolkit.basic import flush
 from toolkit.memory_management import MemoryManager
 from toolkit.prompt_utils import PromptEmbeds
@@ -399,24 +397,11 @@ class AnimaModel(QwenImageModel):
         guidance_scale = gen_config.guidance_scale
         do_cfg = guidance_scale > 1.0
 
-        scheduler = QwenImageModel.get_train_scheduler()
-
-        # AutoencoderKLQwenImage uses 16× spatial downsampling
-        vae_sf = 16
+        # VAE has 8× spatial downsampling (confirmed by encode test: 512→64)
+        vae_sf = 8
         num_channels = self.vae.config.z_dim
         latent_h = height // vae_sf
         latent_w = width // vae_sf
-
-        # Dynamic shift requires mu computed from the latent sequence length
-        image_seq_len = latent_h * latent_w
-        mu = calculate_shift(
-            image_seq_len,
-            scheduler.config.get("base_image_seq_len", 256),
-            scheduler.config.get("max_image_seq_len", 8192),
-            scheduler.config.get("base_shift", 0.5),
-            scheduler.config.get("max_shift", 0.9),
-        )
-        scheduler.set_timesteps(num_steps, device=self.device_torch, mu=mu)
 
         if generator is not None and generator.device != torch.device(self.device_torch):
             seed = generator.initial_seed()
@@ -424,54 +409,46 @@ class AnimaModel(QwenImageModel):
 
         if gen_config.latents is not None:
             latents = gen_config.latents.to(self.device_torch, dtype=self.torch_dtype)
+            if latents.dim() == 4:
+                latents = latents.unsqueeze(2)  # (B, C, H, W) → (B, C, 1, H, W)
         else:
             latents = torch.randn(
-                (1, num_channels, latent_h, latent_w),
+                (1, num_channels, 1, latent_h, latent_w),
                 generator=generator,
                 device=self.device_torch,
                 dtype=self.torch_dtype,
             )
 
-        latents = latents * scheduler.init_noise_sigma
+        # Flow-matching Euler sampler matching kohya-ss/sd-scripts anima_train_utils.do_sample()
+        # Linear sigma schedule 1.0→0.0 with flow_shift=3.0
+        flow_shift = 3.0
+        sigmas = torch.linspace(1.0, 0.0, num_steps + 1, device=self.device_torch, dtype=self.torch_dtype)
+        sigmas = (sigmas * flow_shift) / (1 + (flow_shift - 1) * sigmas)
+
+        padding_mask = torch.zeros(1, 1, latent_h, latent_w, dtype=self.torch_dtype, device=self.device_torch)
 
         self.model.to(self.device_torch)
 
-        for t in scheduler.timesteps:
-            if do_cfg:
-                latent_input = torch.cat([latents] * 2)
-                ue = unconditional_embeds.text_embeds.to(self.device_torch, self.torch_dtype)
-                ce = conditional_embeds.text_embeds.to(self.device_torch, self.torch_dtype)
-                # Pad to the same sequence length if necessary
-                if ue.shape[1] != ce.shape[1]:
-                    max_len = max(ue.shape[1], ce.shape[1])
-                    ue = torch.nn.functional.pad(ue, (0, 0, 0, max_len - ue.shape[1]))
-                    ce = torch.nn.functional.pad(ce, (0, 0, 0, max_len - ce.shape[1]))
-                context = torch.cat([ue, ce], dim=0)
-            else:
-                latent_input = latents
-                context = conditional_embeds.text_embeds.to(self.device_torch, self.torch_dtype)
+        ce = conditional_embeds.text_embeds.to(self.device_torch, self.torch_dtype)
+        ue = unconditional_embeds.text_embeds.to(self.device_torch, self.torch_dtype) if do_cfg else None
 
-            latent_input = scheduler.scale_model_input(latent_input, t)
-            # Normalize to [0, 1] continuous-time range expected by the model
-            t_01 = t.float().item() / 1000.0
-            ts = torch.tensor([t_01] * latent_input.shape[0], device=self.device_torch, dtype=self.torch_dtype)
+        for i in range(num_steps):
+            sigma = sigmas[i]
+            t = sigma.unsqueeze(0)
 
             with torch.no_grad():
-                x5d = latent_input.unsqueeze(2)
-                noise_pred = self.model(x5d, ts, context).squeeze(2)
+                if do_cfg:
+                    pos_out = self.model(latents, t, ce, padding_mask=padding_mask).float()
+                    neg_out = self.model(latents, t, ue, padding_mask=padding_mask).float()
+                    model_output = neg_out + guidance_scale * (pos_out - neg_out)
+                else:
+                    model_output = self.model(latents, t, ce, padding_mask=padding_mask).float()
 
-            if t == scheduler.timesteps[0]:
-                print(f"[Anima DEBUG] context shape={context.shape}, mean={context.float().mean():.4f}, std={context.float().std():.4f}")
-                print(f"[Anima DEBUG] noise_pred: mean={noise_pred.float().mean():.4f}, std={noise_pred.float().std():.4f}, abs_max={noise_pred.float().abs().max():.4f}")
-                print(f"[Anima DEBUG] latents before step: mean={latents.float().mean():.4f}, std={latents.float().std():.4f}")
+            dt = sigmas[i + 1] - sigma
+            latents = (latents.float() + model_output * dt).to(self.torch_dtype)
 
-            if do_cfg:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-            latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-
-        return self._decode_latents_to_pil(latents)
+        # latents: (1, C, 1, H/8, W/8) → squeeze temporal → (1, C, H/8, W/8) for decoder
+        return self._decode_latents_to_pil(latents.squeeze(2))
 
     def _decode_latents_to_pil(self, latents: torch.Tensor) -> Image.Image:
         """Reverse VAE normalisation and decode latents to a PIL image."""
@@ -527,8 +504,8 @@ class AnimaModel(QwenImageModel):
         return ["blocks"]
 
     def get_bucket_divisibility(self):
-        # VAE 16× downsampling + patch_spatial=2 → divisible by 32
-        return 32
+        # VAE 8× downsampling + patch_spatial=2 → divisible by 16
+        return 16
 
     def convert_lora_weights_before_save(self, state_dict):
         new_sd = {}

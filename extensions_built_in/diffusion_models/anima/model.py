@@ -522,6 +522,7 @@ class MiniTrainDIT(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        self.gradient_checkpointing = False
         self.dtype = dtype
         self.max_img_h = max_img_h
         self.max_img_w = max_img_w
@@ -600,6 +601,12 @@ class MiniTrainDIT(nn.Module):
 
         self.t_embedding_norm = RMSNorm(model_channels)
 
+    def enable_gradient_checkpointing(self):
+        self.gradient_checkpointing = True
+
+    def disable_gradient_checkpointing(self):
+        self.gradient_checkpointing = False
+
     def _build_pos_embed(self, device=None):
         assert self.pos_emb_cls == "rope3d", f"Only rope3d is supported, got {self.pos_emb_cls}"
         self.pos_embedder = VideoRopePosition3DEmb(
@@ -672,7 +679,13 @@ class MiniTrainDIT(nn.Module):
         )
 
         for block in self.blocks:
-            x_B_T_H_W_D = block(x_B_T_H_W_D, t_embedding_B_T_D, context, **block_kwargs)
+            if self.gradient_checkpointing and self.training:
+                x_B_T_H_W_D = torch.utils.checkpoint.checkpoint(
+                    block, x_B_T_H_W_D, t_embedding_B_T_D, context,
+                    use_reentrant=False, **block_kwargs
+                )
+            else:
+                x_B_T_H_W_D = block(x_B_T_H_W_D, t_embedding_B_T_D, context, **block_kwargs)
 
         x_out = self.final_layer(x_B_T_H_W_D, t_embedding_B_T_D, adaln_lora_B_T_3D=adaln_lora_B_T_3D)
         return self.unpatchify(x_out)
